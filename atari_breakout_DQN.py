@@ -76,25 +76,35 @@ class DeepQN:
         self.learning_rate = learning_rate
         self.discountFactor = discountFactor
 
-        self.network = tf.keras.models.Sequential()
-        self.network.add(tf.keras.layers.Conv2D(32, (8, 8), strides=4, activation='relu', input_shape=state_shape,
+        self.network = self.createModel()
+        self.targetNetwork = self.createModel()
+
+    def createModel(self):
+        network = tf.keras.models.Sequential()
+        network.add(tf.keras.layers.Conv2D(32, (8, 8), strides=4, activation='relu', input_shape=self.state_shape,
                                                 kernel_initializer=tf.keras.initializers.VarianceScaling(scale=2)))
-        self.network.add(tf.keras.layers.Conv2D(64, (4, 4), strides=2, activation='relu',
+        network.add(tf.keras.layers.Conv2D(64, (4, 4), strides=2, activation='relu',
                                                 kernel_initializer=tf.keras.initializers.VarianceScaling(scale=2)))
-        self.network.add(tf.keras.layers.Conv2D(64, (3, 3), strides=1, activation='relu',
+        network.add(tf.keras.layers.Conv2D(64, (3, 3), strides=1, activation='relu',
                                                 kernel_initializer=tf.keras.initializers.VarianceScaling(scale=2)))
-        self.network.add(tf.keras.layers.Conv2D(1024, (7, 7), strides=1, activation='relu',
+        network.add(tf.keras.layers.Conv2D(1024, (7, 7), strides=1, activation='relu',
                                                 kernel_initializer=tf.keras.initializers.VarianceScaling(scale=2)))
-        self.network.add(tf.keras.layers.Flatten())
-        self.network.add(tf.keras.layers.Dense(n_actions, activation='linear', kernel_initializer=tf.keras.initializers.VarianceScaling(scale=2)))
+        network.add(tf.keras.layers.Flatten())
+        network.add(tf.keras.layers.Dense(n_actions, activation='linear', kernel_initializer=tf.keras.initializers.VarianceScaling(scale=2)))
 
         optimizer = tf.keras.optimizers.RMSprop(learning_rate=self.learning_rate)
-        self.network.compile(loss=tf.keras.losses.MeanSquaredError(), optimizer=optimizer)
-        self.network.summary()        
+        network.compile(loss=tf.keras.losses.MeanSquaredError(), optimizer=optimizer)
+        network.summary()
+        return network
 
     def getQValues(self, state):
         state = np.expand_dims(state, axis=0)
         qValues = self.network.predict(state, verbose=0)
+        return qValues[0]
+    
+    def getTargetQValues(self, state):
+        state = np.expand_dims(state, axis=0)
+        qValues = self.targetNetwork.predict(state, verbose=0)
         return qValues[0]
     
     def selectAction(self, qValues, explorationRate):
@@ -113,8 +123,22 @@ class DeepQN:
             return reward
         else:
             return reward + self.discountFactor * np.max(qValuesNewState)
+        
+    def backupNetwork(self, model, backup):
+        weightMatrix = []
+        for layer in model.layers:
+            weights = layer.get_weights()
+            weightMatrix.append(weights)
+        i = 0
+        for layer in backup.layers:
+            weights = weightMatrix[i]
+            layer.set_weights(weights)
+            i += 1
+        
+    def updateTargetNetwork(self):
+        self.backupNetwork(self.network, self.targetNetwork)
 
-    def trainOnMiniBatch(self, minibatch_size):
+    def trainOnMiniBatch(self, minibatch_size, useTargetNetwork=False):
         minibatch = self.memory.getMiniBatch(minibatch_size)
         X_batch = np.empty((0, self.state_shape[0], self.state_shape[1], self.state_shape[2]), dtype = np.float64)
         Y_batch = np.empty((0, self.n_actions), dtype = np.float64)
@@ -125,7 +149,10 @@ class DeepQN:
             newState = sample[3]
             isFinal = sample[4]
             qValues = self.getQValues(state)
-            qValuesNewState = self.getQValues(newState)
+            if useTargetNetwork:
+                qValuesNewState = self.getTargetQValues(newState)
+            else :
+                qValuesNewState = self.getQValues(newState)
             targetValue = self.calculateTarget(qValuesNewState, reward, isFinal)
 
             X_batch = np.append(X_batch, np.array([state.copy()]), axis=0)
@@ -152,6 +179,7 @@ learningRate = 0.1
 discountFactor = 0.9
 stepCounter = 0
 minibatch_size = 10
+updateTargetNetwork = 1000
 
 n_actions = env.action_space.n
 state_dim = env.observation_space.shape
@@ -171,8 +199,16 @@ for epoch in range(epochs):
         info = return_val[3]
         model.addToMemory(observation, action, reward, newObservation, done)
         if stepCounter >= learnStart and stepCounter % 10 == 0:
-            model.trainOnMiniBatch(minibatch_size)
+            if stepCounter <= updateTargetNetwork:
+                model.trainOnMiniBatch(minibatch_size, False)
+            else :
+                model.trainOnMiniBatch(minibatch_size, True)
         stepCounter += 1
+
+        if stepCounter % updateTargetNetwork == 0:
+            model.updateTargetNetwork()
+            print("updating target network")
+
         if done:
             break
         observation = newObservation
